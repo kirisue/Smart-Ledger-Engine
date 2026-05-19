@@ -53,7 +53,7 @@ BASE_DIR = app_dir()
 DB_PATH = os.path.join(BASE_DIR, "ledger.db")
 LOG_PATH = os.path.join(BASE_DIR, "解析诊断日志.txt")
 CONFIG_FILE = os.path.join(BASE_DIR, "user_settings.json")
-TEMPLATE_FILE = os.path.join(BASE_DIR, "jx3_preset.json")
+TEMPLATE_FILE = os.path.join(BASE_DIR, "preset.json")
 ICON_PNG_NAME = "icon_64.png"
 ICON_ICO_NAME = "icon.ico"
 
@@ -114,7 +114,8 @@ def load_template():
                 return tpl
 
         # —— 配置合并（两路共用） ——
-        for key in ("app_title", "calc_mode", "terms", "scenes", "ai_rules", "lists", "streaks"):
+       # —— 配置合并（两路共用） ——
+        for key in ("app_title", "calc_mode", "terms", "scenes", "ai_rules", "lists", "streaks", "export_templates"):
             if key in external:
                 if isinstance(external[key], dict) and isinstance(tpl.get(key), dict):
                     tpl[key].update(external[key])
@@ -191,7 +192,7 @@ def get_logic_date():
     return now.strftime("%Y-%m-%d")
 
 def team_display(team): return team if team else "无" + T("tag", "标签")
-def kind_name(kind_code): return T("kind_fight", T("flow_zero", "冲平")) if kind_code == "fight" else T("kind_normal", "标准记录")
+def kind_name(kind_code):return T("kind_fight", T("flow_zero", "冲平")) if kind_code == "fight" else T("kind_normal", "标准")
 def fmt_num(val): return int(val) if float(val).is_integer() else float(val)
 
 def center_window(win, width, height, parent=None):
@@ -557,17 +558,155 @@ def copy_cb(text):
         pyperclip.copy(str(text))
     except:
         r = tk.Tk(); r.withdraw(); r.clipboard_clear(); r.clipboard_append(str(text)); r.update(); r.destroy()
+def fmt_line(n, tm, d, t, nt):
+    try: d = float(d)
+    except: d = 0
+        
+    b_name = ""
+    ext = nt if nt else ""
+    import re
+    m = re.match(r"^\[(.*?)\]\s*(.*)", ext)
+    if m:
+        b_name = m.group(1)
+        ext = m.group(2).strip()
+        
+    # 🌟 去 JSON 中寻找定制的导出格式，如果没有，就使用标准泛用格式保底
+    tpls = APP_TPL.get("export_templates", {})
+    
+    if d > 0:
+        fmt_str = tpls.get("flow_out", "{time} 【{team}】 {name} ➡ 流出/支出 | 数额: {amount} {remark}")
+    elif d < 0:
+        fmt_str = tpls.get("flow_in", "{time} 【{team}】 {name} ➡ 流入/收入 | " + T('amount', '数额') + ": {amount} {remark}")
+    else:
+        fmt_str = tpls.get("flow_zero", "{time} 【{team}】 {name} ➡ " + T('flow_zero', '冲平/坏账') + " {remark}")
+
+    # 执行底层字符串智能替换 (支持替换的占位符有 {time}, {team}, {name}, {amount}, {remark})
+    res = fmt_str.replace("{time}", str(t))
+    res = res.replace("{team}", team_display(tm))
+    res = res.replace("{name}", str(n))
+    res = res.replace("{amount}", str(fmt_num(abs(d))))
+    res = res.replace("{remark}", f"(备注:{ext})" if ext else "")
+    
+    return res.strip()
+    
+def export_multi_rows(table, sel):
+    if not sel: return
+    rows = []
+    for iid in sel:
+        v = table.item(iid, "values")
+        if not v: continue
+        if len(v) >= 8: 
+            try: d = float(str(v[5]).strip().replace("+", ""))
+            except: d = 0
+            rows.append((v[0], v[1], d, v[6], v[7]))
+        else: 
+            try: b = float(str(v[4]).strip())
+            except: b = 0
+            d = 1 if b > 0 else (-1 if b < 0 else 0) if CALC_MODE == "121_replace" else -b
+            rows.append((v[0], v[1], d, v[5] if len(v) > 5 else now_str(), ""))
+            
+    rows.sort(key=lambda x: x[3])
+    lines = [fmt_line(n, tm, d, t, nt) for n, tm, d, t, nt in rows]
+    text = "\n".join(lines).strip()
+    
+    if text:
+        copy_cb(text)
+        if len(sel) == 1: 
+            messagebox.showinfo("已导出本条", "本条数据已复制到剪贴板！\n\n" + text)
+        else: 
+            messagebox.showinfo("批量导出成功", f"成功导出并复制了 {len(rows)} 条选中数据！")
+
+def export_btn_handler():
+    sel = records_table.selection()
+    t = records_table
+    if not sel:
+        sel = accounts_table.selection()
+        t = accounts_table
+        
+    if not sel:
+        if not messagebox.askyesno("未选择", "未在任何表格中选中数据。\n是否为您自动导出历史最近 20 条记录？"): 
+            return
+        conn = sqlite3.connect(DB_PATH)
+        c = conn.cursor()
+        c.execute("SELECT name, team_tag, delta, time, note FROM records ORDER BY id DESC LIMIT 20")
+        rows = list(reversed(c.fetchall()))
+        conn.close()
+        
+        lines = [fmt_line(n, tm, d, t, nt) for n, tm, d, t, nt in rows]
+        text = "\n".join(lines).strip()
+        if text:
+            copy_cb(text)
+            messagebox.showinfo("已复制", "已自动复制最近20条历史记录！")
+    else:
+        export_multi_rows(t, sel)
+
+def export_full_history():
+    from datetime import datetime
+    conn = sqlite3.connect(DB_PATH)
+    c = conn.cursor()
+    c.execute("SELECT name, team_tag, faction, action, delta, time, note FROM records ORDER BY id ASC")
+    rows = c.fetchall()
+    conn.close()
+    
+    if not rows: 
+        messagebox.showinfo("提示", "数据库中暂无任何历史数据！")
+        return
+    
+    lines = [f"📊 [{APP_TPL.get('app_title', '泛用记账引擎')}] 全量历史战绩报账单", "-"*45]
+    for i, r in enumerate(rows, 1):
+        line_text = fmt_line(r[0], r[1], r[4], r[5], r[6])
+        lines.append(f"{i}. {line_text}")
+        
+    lines.append("-" * 45 + "\n*数据由引擎生成*")
+    full_text = "\n".join(lines)
+    copy_cb(full_text)
+    
+    if messagebox.askyesno("全量导出成功", f"共提取了 {len(rows)} 条历史记录！\n内容已复制到剪贴板，您可以直接去群里粘贴。\n\n是否同时将它保存为 txt 文本文件留底备份？"):
+        path = filedialog.asksaveasfilename(title="保存全量账单", defaultextension=".txt", filetypes=[("Text Files", "*.txt")], initialfile=f"全量账单_{datetime.now().strftime('%Y%m%d')}.txt")
+        if path:
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(full_text)
 
 def import_template():
     path = filedialog.askopenfilename(title="选择业务模板 JSON 文件", filetypes=[("JSON", "*.json")])
     if not path: return
     try:
-        with open(path, 'r', encoding='utf-8') as f: tpl = json.load(f)
-        if not isinstance(tpl, dict) or "terms" not in tpl: messagebox.showerror("错误", "无效的模板格式"); return
-        target = os.path.join(BASE_DIR, "jx3_preset.json")
-        shutil.copy2(path, target)
-        messagebox.showinfo("成功", "业务模板已成功导入！\n请重启程序以生效。")
-    except Exception as e: messagebox.showerror("错误", f"导入失败: {e}")
+        with open(path, 'rb') as f:
+            raw_data = f.read()
+        
+        # 🛡️ 智能验证第一路：尝试明文解析
+        try:
+            text_data = raw_data.decode('utf-8')
+            tpl = json.loads(text_data)
+        except Exception:
+            # 🛡️ 智能验证第二路：尝试密文解密解析
+            import base64
+            decoded = base64.b64decode(raw_data)
+            obfuscate_key = b"kirisu_ledger_dynamic_secret_2026"
+            decrypted_bytes = bytes([b ^ obfuscate_key[i % len(obfuscate_key)] for i, b in enumerate(decoded)])
+            text_data = decrypted_bytes.decode('utf-8')
+            tpl = json.loads(text_data)
+
+        # 校验文件是否真的是我们的业务模板
+        if not isinstance(tpl, dict) or "terms" not in tpl: 
+            messagebox.showerror("错误", "无效的模板格式：缺少核心业务字典。")
+            return
+        
+        # 🌟 核心安全升级：无论群友导入的是明文还是密文，本地存盘时一律强行自动加密！
+        clean_text = json.dumps(tpl, ensure_ascii=False, separators=(',', ':'))
+        import base64
+        obfuscate_key = b"kirisu_ledger_dynamic_secret_2026"
+        raw_bytes = clean_text.encode('utf-8')
+        encrypted_bytes = bytes([b ^ obfuscate_key[i % len(obfuscate_key)] for i, b in enumerate(raw_bytes)])
+        final_output = base64.b64encode(encrypted_bytes)
+        
+        target = os.path.join(BASE_DIR, "preset.json")
+        with open(target, 'wb') as f:
+            f.write(final_output)
+            
+        messagebox.showinfo("成功", "业务模板已成功导入并自动完成底层加密锁死！\n请重启程序以生效。")
+    except Exception as e: 
+        messagebox.showerror("错误", f"导入失败：文件可能已损坏，或非本软件支持的格式。\n\n详情: {e}")
 
 # ================= 核心提交逻辑 =================
 def handle_submit(from_ai=False):
@@ -662,14 +801,18 @@ def handle_submit(from_ai=False):
 
     streak_msg = check_streak(is_win) if is_win is not None else None
     
-    if streak_msg:
+    if  streak_msg:
         speak_text(streak_msg)
         show_result_popup(name, team, action, delta, new_balance, streak_msg)
     else:
         voice_text = ""
-        if faction == T("flow_in", "流入"):
+        # 🌟 核心修复：如果是打架队，不进行输赢播报
+        if is_fight:
+            voice_text = ""
+        # 🌟 核心修复：直接根据最终严谨推导的 is_win 结果来决定播报什么，彻底跟下拉框解耦！
+        elif is_win:
             voice_text = T("voice_win", "新增一笔流入！")
-        elif faction == T("flow_out", "流出"):
+        else:
             voice_text = T("voice_lose", "新增一笔流出！")
 
         if enable_voice_var.get() and voice_text:
@@ -1284,7 +1427,10 @@ try:
 
     tk.Button(frame_left, text="⚡ 快速避雷此人", width=28, command=quick_blacklist, bg="#ffebee", fg="#c62828", font=get_font("btn")).pack(pady=5)
     tk.Button(frame_left, text="🎮 开启迷你悬浮窗 (可拖拽/隐藏)", command=open_mini_window, bg="#e3f2fd", font=get_font("btn", True)).pack(pady=(5, 10), fill=tk.X)
-
+    ef = tk.Frame(frame_left)
+    ef.pack(fill=tk.X, pady=(0, 10))
+    tk.Button(ef, text="批量导出(可多选)", width=13, font=get_font("btn"), command=export_btn_handler).pack(side=tk.LEFT, padx=(0, 5))
+    tk.Button(ef, text="全量账单(所有)", width=13, font=get_font("btn"), command=export_full_history, bg="#e8f5e9").pack(side=tk.LEFT)
     tk.Label(frame_left, text=f"提示：在右侧表格可按 Ctrl+点击 多选\n右键可【更换{T('tag', '标签')}】或【删除数据】\n", justify="left", font=("", 10)).pack(anchor="w", pady=10)
 
 
