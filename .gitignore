@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+ledger.db
+user_settings.json
+*.exe
+build/
+dist/
+*.spec
+temp_ptt.wav
+*.mp3

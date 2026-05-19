@@ -1,0 +1,8 @@
+keyboard
+pyaudio
+SpeechRecognition
+edge-tts
+pygame
+requests
+pandas
+pdfplumber
